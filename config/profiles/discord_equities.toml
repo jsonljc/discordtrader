@@ -1,0 +1,16 @@
+# ── Profile metadata ──────────────────────────────────────────
+[profile]
+name        = "discord_equities"
+description = "Discord equity signals, 3–7% sleeve sizing, standard TWS paper port"
+
+# ── Risk parameters ───────────────────────────────────────────
+[risk]
+min_position_pct      = 0.03
+max_position_pct      = 0.07
+max_open_positions    = 10
+max_daily_drawdown_pct = 0.05
+
+# ── IBKR connection ───────────────────────────────────────────
+[ibkr]
+ibkr_port      = 7497   # TWS paper
+ibkr_client_id = 1

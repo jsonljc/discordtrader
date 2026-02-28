@@ -1,0 +1,81 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openclawtrader"
+version = "0.1.0"
+description = "OpenClaw-compatible Discord signals → risk gate → IBKR execution system"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "discord.py>=2.3.2",
+    "ib_insync>=0.9.86",
+    "openai>=1.0.0",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.2.0",
+    "python-dotenv>=1.0.0",
+    "structlog>=24.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.3.0",
+    "mypy>=1.9.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+    "types-toml>=0.10.8",
+]
+
+[project.scripts]
+oct-listener    = "cli.run_listener:main"
+oct-interpreter = "cli.run_interpreter:main"
+oct-risk        = "cli.run_risk:main"
+oct-executor    = "cli.run_executor:main"
+oct-paper       = "cli.run_paper:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["config", "schemas", "agents", "bus", "audit", "cli"]
+
+# ── Ruff ──────────────────────────────────────────────────────
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+ignore = [
+    "N805",   # pydantic @classmethod validators use cls, not self
+    "UP007",  # allow `X | Y` over `Optional[X]` — personal style
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["config", "schemas", "agents", "bus", "audit", "cli"]
+
+# ── Mypy ──────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+# pydantic plugin improves type inference for BaseModel subclasses
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+# ── Pytest ────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["config", "schemas", "agents", "bus", "audit"]
+omit = ["tests/*", "cli/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

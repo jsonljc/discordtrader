@@ -1,0 +1,16 @@
+# ── Profile metadata ──────────────────────────────────────────
+[profile]
+name        = "paper"
+description = "Conservative paper-trading profile for integration testing"
+
+# ── Risk parameters — more conservative than discord_equities ─
+[risk]
+min_position_pct       = 0.03
+max_position_pct       = 0.05   # tighter upper bound during testing
+max_open_positions     = 5
+max_daily_drawdown_pct = 0.10   # more lenient to allow extended test runs
+
+# ── IBKR connection ───────────────────────────────────────────
+[ibkr]
+ibkr_port      = 7497   # TWS paper
+ibkr_client_id = 99     # high client_id avoids collision with manual sessions
