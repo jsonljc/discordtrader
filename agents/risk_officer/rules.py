@@ -209,7 +209,6 @@ def evaluate_trade(
     REJECTED outcomes.
 
     Evaluation order (first failure wins):
-        0. LLM-parsed intent gate                 → NEEDS_APPROVAL (never auto-executes)
         1. Manual circuit-breaker halt            → REJECTED
         2. Daily drawdown circuit-breaker         → REJECTED
         3. Max open positions                     → REJECTED
@@ -242,22 +241,6 @@ def evaluate_trade(
             rejection_reasons=reasons,
             profile=profile,
         )
-
-    def _needs_approval(reasons: list[str]) -> RiskDecision:
-        return RiskDecision(
-            correlation_id=correlation_id,
-            source_intent_id=source_intent_id,
-            outcome=RiskOutcome.NEEDS_APPROVAL,
-            rejection_reasons=reasons,
-            profile=profile,
-        )
-
-    # ── 0. LLM-parsed intent gate (critical-path safety) ──────────────────────
-    # Intents produced by the LLM parser always require a human to review before
-    # execution.  The executor will emit a CANCELLED receipt for NEEDS_APPROVAL
-    # decisions and log the intent for manual review.
-    if intent.requires_manual_approval:
-        return _needs_approval(["llm_parsed_requires_manual_approval"])
 
     # ── 1. Manual halt ────────────────────────────────────────────────────────
     if is_manually_halted:

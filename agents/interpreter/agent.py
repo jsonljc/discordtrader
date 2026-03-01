@@ -38,8 +38,7 @@ class InterpreterAgent:
         - Options fields (option_type, strike, expiry) populated when signal
           specifies a contract
         - template_name is set to "llm_parsed" to distinguish from regex intents
-        - requires_manual_approval is always True — LLM intents NEVER auto-execute;
-          the Risk Officer will force NEEDS_APPROVAL on any intent with this flag
+        - LLM intents flow through the same risk evaluation as regex intents
     """
 
     def __init__(self, settings: Settings, bus: PipelineBus) -> None:
@@ -225,8 +224,6 @@ class InterpreterAgent:
             take_profit_price=_to_decimal(llm_result.take_profit_price),
             confidence=confidence,
             template_name="llm_parsed",
-            # LLM-produced intents NEVER auto-execute — forced NEEDS_APPROVAL.
-            requires_manual_approval=True,
             # Options fields
             option_type=_to_option_type(llm_result),
             strike=_to_decimal(llm_result.strike),

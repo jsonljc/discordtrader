@@ -68,10 +68,7 @@ class TradeIntent(BaseModel):
     # ── Smart selector flag (set by Risk Officer in Batch 7B) ──────────────
     use_smart_options_selector: bool = False
 
-    # ── Critical-path gate ─────────────────────────────────────────────────
-    # True when this intent was produced by the LLM parser (template_name ==
-    # "llm_parsed").  The Risk Officer must force NEEDS_APPROVAL for any intent
-    # with this flag set — LLM-parsed signals NEVER auto-execute.
+    # ── Manual approval flag (unused — kept for schema compatibility) ──────
     requires_manual_approval: bool = False
 
     # ── LLM parse metadata (None when produced by regex path) ──────────────
