@@ -201,3 +201,17 @@ class TestHandleMessage:
         for msg_id in [100, 200, 300]:
             await agent._handle_message(_make_message(message_id=msg_id))
         assert bus.signals.qsize() == 3
+
+    @pytest.mark.asyncio
+    async def test_empty_content_not_enqueued(self) -> None:
+        """Embed-only / sticker messages with no text content are dropped."""
+        agent, bus = self._make_agent()
+        await agent._handle_message(_make_message(content=""))
+        assert bus.signals.empty()
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only_content_not_enqueued(self) -> None:
+        """Whitespace-only message content is treated as empty and dropped."""
+        agent, bus = self._make_agent()
+        await agent._handle_message(_make_message(content="   \n\t  "))
+        assert bus.signals.empty()

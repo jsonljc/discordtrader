@@ -198,6 +198,8 @@ def evaluate_trade(
     max_open_positions: int,
     max_daily_drawdown_pct: Decimal,
     is_manually_halted: bool = False,
+    min_position_pct: Decimal | None = None,
+    max_position_pct: Decimal | None = None,
 ) -> RiskDecision:
     """
     Evaluate a TradeIntent against the current portfolio and configured limits.
@@ -207,6 +209,7 @@ def evaluate_trade(
     REJECTED outcomes.
 
     Evaluation order (first failure wins):
+        0. LLM-parsed intent gate                 → NEEDS_APPROVAL (never auto-executes)
         1. Manual circuit-breaker halt            → REJECTED
         2. Daily drawdown circuit-breaker         → REJECTED
         3. Max open positions                     → REJECTED
@@ -221,7 +224,15 @@ def evaluate_trade(
     source_intent_id = intent.event_id
     profile = intent.profile
     sleeve_value = portfolio.sleeve_value
+
+    # Clamp tier % to configured bounds so the module-level constant never
+    # exceeds the operator-configured min/max_position_pct.
+    # e.g. tier 7.5% is clamped to 7.0% when max_position_pct=0.07.
     tier_pct = tier_position_pct(intent.confidence)
+    if min_position_pct is not None:
+        tier_pct = max(tier_pct, min_position_pct)
+    if max_position_pct is not None:
+        tier_pct = min(tier_pct, max_position_pct)
 
     def _rejected(reasons: list[str]) -> RiskDecision:
         return RiskDecision(
@@ -231,6 +242,22 @@ def evaluate_trade(
             rejection_reasons=reasons,
             profile=profile,
         )
+
+    def _needs_approval(reasons: list[str]) -> RiskDecision:
+        return RiskDecision(
+            correlation_id=correlation_id,
+            source_intent_id=source_intent_id,
+            outcome=RiskOutcome.NEEDS_APPROVAL,
+            rejection_reasons=reasons,
+            profile=profile,
+        )
+
+    # ── 0. LLM-parsed intent gate (critical-path safety) ──────────────────────
+    # Intents produced by the LLM parser always require a human to review before
+    # execution.  The executor will emit a CANCELLED receipt for NEEDS_APPROVAL
+    # decisions and log the intent for manual review.
+    if intent.requires_manual_approval:
+        return _needs_approval(["llm_parsed_requires_manual_approval"])
 
     # ── 1. Manual halt ────────────────────────────────────────────────────────
     if is_manually_halted:

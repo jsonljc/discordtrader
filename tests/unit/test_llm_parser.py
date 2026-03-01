@@ -255,6 +255,21 @@ def test_build_result_returns_none_when_both_ticker_and_direction_missing() -> N
 
 
 @pytest.mark.asyncio
+async def test_llm_parse_raises_when_openai_not_installed() -> None:
+    """When openai is not installed, llm_parse raises ImportError with install hint."""
+    import agents.interpreter.llm_parser as llm_parser_mod
+
+    orig = llm_parser_mod._OPENAI_IMPORT_ERROR
+    llm_parser_mod._OPENAI_IMPORT_ERROR = ImportError("No module named 'openai'")
+    try:
+        with pytest.raises(ImportError) as exc_info:
+            await llm_parse("BUY AAPL", _settings())
+        assert "openclawtrader[llm]" in str(exc_info.value)
+    finally:
+        llm_parser_mod._OPENAI_IMPORT_ERROR = orig
+
+
+@pytest.mark.asyncio
 async def test_llm_parse_returns_none_when_no_api_key() -> None:
     settings = _settings(openai_api_key="")
     result = await llm_parse("BUY AAPL", settings)

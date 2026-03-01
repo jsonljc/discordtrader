@@ -187,15 +187,19 @@ oct-paper --profile discord_equities  # standard sizing
 
 The Risk Officer enforces all constraints as pure functions (no IBKR call until they pass):
 
+0. **LLM-parsed gate** — any intent with `requires_manual_approval=True` (set by LLM path) is immediately forced to `NEEDS_APPROVAL` and never auto-executes
 1. **Circuit breaker** — manually halted state blocks all trades
 2. **Drawdown** — daily P&L % must be above `−MAX_DAILY_DRAWDOWN_PCT`
 3. **Position count** — open positions must be below `MAX_OPEN_POSITIONS`
-4. **Ticker validation** — non-tradable symbols (currencies, crypto, generic words) rejected
-5. **Entry price** — must be present for execution sizing
-6. **Position sizing** — risk-based (1% of sleeve ÷ |entry − stop|), clamped to `[MIN, MAX]_POSITION_PCT`
+4. **Position sizing** — flat confidence-tier allocation, clamped to `[MIN_POSITION_PCT, MAX_POSITION_PCT]`:
+   - `HIGH` tier → `7.5%` (clamped to max; HIGH LONG equity → SmartOptionsSelector)
+   - `MEDIUM` tier → `7.5%` (clamped to max; shares only)
+   - `LOW` tier → `5.0%` (raised to min if below; shares only)
+5. **Zero quantity guard** — rejected if computed quantity rounds to 0
+6. **Total exposure cap** — total open exposure must stay ≤ 80% of sleeve
 
 Outcomes:
-- `APPROVED` → auto-executed by Executor
+- `APPROVED` → auto-executed by Executor (regex-parsed intents only)
 - `NEEDS_APPROVAL` → logged; held for manual confirmation; Executor emits CANCELLED receipt
 - `REJECTED` → discarded; Executor emits CANCELLED receipt
 

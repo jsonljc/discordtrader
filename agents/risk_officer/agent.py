@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from audit.heartbeat import AgentHeartbeat
 from audit.hasher import stamp
 from audit.logger import bind_correlation_id, get_logger
 from bus.queue import PipelineBus
@@ -38,9 +39,21 @@ class RiskOfficerAgent:
         self._adapter = PortfolioAdapter(settings)
         self._circuit_breaker = CircuitBreaker()
         self._log = get_logger("risk_officer")
+        self._heartbeat = AgentHeartbeat(
+            "risk_officer",
+            interval_seconds=getattr(settings, "heartbeat_interval_seconds", 30.0),
+        )
 
     async def run(self) -> None:
         """Consume bus.intents indefinitely, emitting RiskDecisions."""
+        self._heartbeat.start()
+        try:
+            await self._run_loop()
+        finally:
+            self._heartbeat.stop()
+
+    async def _run_loop(self) -> None:
+        """Inner loop — consumes intents and emits decisions."""
         self._log.info(
             "risk_officer_started",
             profile=self._settings.profile,
@@ -72,6 +85,8 @@ class RiskOfficerAgent:
             max_open_positions=self._settings.max_open_positions,
             max_daily_drawdown_pct=self._settings.max_daily_drawdown_pct,
             is_manually_halted=self._circuit_breaker.is_halted,
+            min_position_pct=self._settings.min_position_pct,
+            max_position_pct=self._settings.max_position_pct,
         )
 
         stamped: RiskDecision = stamp(decision)  # type: ignore[assignment]

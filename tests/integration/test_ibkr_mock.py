@@ -100,6 +100,12 @@ class _FakeIB:
         trade.fills = []
         return trade
 
+    async def reqOpenOrdersAsync(self) -> list[Any]:  # noqa: N802
+        return []
+
+    async def reqExecutionsAsync(self, execFilter: Any = None) -> list[Any]:  # noqa: N802
+        return []
+
 
 class _FakeIBTimeout(_FakeIB):
     """Variant that never fills — produces SUBMITTED on timeout."""
@@ -466,3 +472,105 @@ async def test_short_approved_decision_fills() -> None:
 
     assert receipt.status == OrderStatus.FILLED
     assert receipt.filled_quantity == Decimal("10")
+
+
+# ── _retry_place helper ───────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_retry_place_succeeds_on_first_attempt() -> None:
+    """_retry_place returns result immediately when factory succeeds first time."""
+    import structlog
+
+    from agents.ibkr_executor.agent import _retry_place
+
+    call_count = 0
+
+    async def _factory() -> str:
+        nonlocal call_count
+        call_count += 1
+        return "ok"
+
+    log = structlog.get_logger()
+    result = await _retry_place(_factory, log=log, correlation_id="cid", label="test")
+    assert result == "ok"
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_place_retries_on_transient_failure() -> None:
+    """_retry_place retries after a transient error and returns on subsequent success."""
+    import structlog
+
+    from agents.ibkr_executor.agent import _retry_place
+
+    call_count = 0
+
+    async def _factory() -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count < 2:
+            raise ConnectionError("transient")
+        return "ok"
+
+    log = structlog.get_logger()
+    result = await _retry_place(_factory, log=log, correlation_id="cid", label="test")
+    assert result == "ok"
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_duplicate_decision_id_produces_cancelled_receipt() -> None:
+    """Re-enqueued decision with same event_id is skipped and emits CANCELLED."""
+    settings = _make_settings()
+    bus = PipelineBus()
+    agent = IBKRExecutorAgent(settings, bus, connection=_FakeConnection())
+    decision = _make_approved_decision()
+
+    receipt1 = await _run_one_cycle(agent, bus, decision)
+    assert receipt1.status == OrderStatus.FILLED
+
+    # Re-enqueue same decision (same event_id)
+    receipt2 = await _run_one_cycle(agent, bus, decision, timeout=2.0)
+    assert receipt2.status == OrderStatus.CANCELLED
+    assert receipt2.error_message == "duplicate_decision_id"
+
+
+@pytest.mark.asyncio
+async def test_executor_emits_error_receipt_when_placement_fails() -> None:
+    """Executor must emit an ERROR receipt (not crash) when order placement exhausts retries."""
+    from uuid import uuid4
+
+    class _FailIB(_FakeIB):
+        def bracketOrder(self, *args: Any, **kwargs: Any) -> list[Any]:  # noqa: N802
+            raise RuntimeError("simulated order failure")
+
+    settings = _make_settings()
+    bus = PipelineBus()
+
+    class _FailConn(_FakeConnection):
+        @property
+        def ib(self) -> _FailIB:  # type: ignore[override]
+            return _FailIB()
+
+    agent = IBKRExecutorAgent(settings, bus, connection=_FailConn())
+
+    decision = RiskDecision(
+        correlation_id=uuid4(),
+        source_intent_id=uuid4(),
+        outcome=RiskOutcome.APPROVED,
+        approved_ticker="AAPL",
+        approved_direction=Direction.LONG,
+        approved_quantity=10,
+        approved_entry_price=Decimal("175.50"),
+        approved_stop_price=Decimal("172.00"),
+        approved_take_profit=Decimal("181.00"),
+        position_size_pct=Decimal("0.07"),
+        profile="discord_equities",
+    )
+
+    # timeout must exceed retry backoff: 1s + 2s = 3s of sleep, plus execution overhead
+    receipt = await _run_one_cycle(agent, bus, decision, timeout=8.0)
+
+    assert receipt.status == OrderStatus.ERROR
+    assert receipt.error_message is not None

@@ -29,10 +29,12 @@ import sys
 from agents.discord_listener import DiscordListenerAgent
 from agents.ibkr_executor import IBKRExecutorAgent
 from agents.interpreter import InterpreterAgent
+from agents.review import ReviewDispatcher
 from agents.risk_officer import RiskOfficerAgent
+from audit.ledger_writer import LedgerWriter
 from audit.logger import configure_logging, get_logger
 from bus.queue import PipelineBus
-from config.settings import load_settings
+from config.settings import load_settings, validate_live_mode
 
 
 def _parse_args() -> argparse.Namespace:
@@ -50,6 +52,7 @@ def _parse_args() -> argparse.Namespace:
 
 async def _run(profile: str | None) -> None:
     settings = load_settings(profile)
+    validate_live_mode(settings)
     configure_logging(settings.log_level, settings.log_format, settings.log_file)
     log = get_logger("cli.run_paper")
 
@@ -73,6 +76,8 @@ async def _run(profile: str | None) -> None:
     interpreter = InterpreterAgent(settings, bus)
     risk = RiskOfficerAgent(settings, bus)
     executor = IBKRExecutorAgent(settings, bus)
+    ledger = LedgerWriter(getattr(settings, "ledger_path", None))
+    review = ReviewDispatcher(bus, settings, ledger_writer=ledger)
 
     # Each agent runs as an independent Task; if one crashes it does not
     # immediately bring down the others (return_exceptions=True), but the
@@ -82,6 +87,7 @@ async def _run(profile: str | None) -> None:
         asyncio.create_task(interpreter.run(), name="interpreter"),
         asyncio.create_task(risk.run(), name="risk"),
         asyncio.create_task(executor.run(), name="executor"),
+        asyncio.create_task(review.run(), name="review"),
     ]
 
     try:

@@ -20,7 +20,15 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
-from openai import APIError, APITimeoutError, AsyncOpenAI
+try:
+    from openai import APIError, APITimeoutError, AsyncOpenAI
+except ImportError as _openai_err:
+    APIError = Exception  # type: ignore[misc, assignment]
+    APITimeoutError = Exception  # type: ignore[misc, assignment]
+    AsyncOpenAI = None  # type: ignore[misc, assignment]
+    _OPENAI_IMPORT_ERROR = _openai_err
+else:
+    _OPENAI_IMPORT_ERROR = None
 
 from audit.logger import get_logger
 from config.settings import Settings
@@ -117,6 +125,11 @@ async def llm_parse(raw_text: str, settings: Settings) -> LLMParseResult | None:
 
     Never raises.
     """
+    if _OPENAI_IMPORT_ERROR is not None:
+        raise ImportError(
+            "LLM parsing requires: pip install 'openclawtrader[llm]'"
+        ) from _OPENAI_IMPORT_ERROR
+
     if not settings.openai_api_key:
         _log.warning("llm_parse_skipped_no_api_key")
         return None

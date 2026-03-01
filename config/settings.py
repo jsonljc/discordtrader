@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tomllib
 from decimal import Decimal
 from pathlib import Path
@@ -9,7 +10,15 @@ from typing import Any
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_PROFILES_DIR = Path(__file__).parent / "profiles"
+# Resolve profiles directory:
+#   1. OPENCLAWTRADER_CONFIG_DIR env var (explicit override — useful when
+#      running from a different cwd or after `pip install -e .` without a
+#      local config/ directory).
+#   2. config/profiles/ relative to *this file* (default for in-tree runs).
+_ENV_CONFIG_DIR = os.environ.get("OPENCLAWTRADER_CONFIG_DIR")
+_PROFILES_DIR = (
+    Path(_ENV_CONFIG_DIR) if _ENV_CONFIG_DIR else Path(__file__).parent / "profiles"
+)
 
 
 class Settings(BaseSettings):
@@ -57,6 +66,17 @@ class Settings(BaseSettings):
     llm_min_clarity: int = 50          # drop signals scored below this (0-100)
     llm_timeout_seconds: float = 8.0
 
+    # ── Review (NEEDS_APPROVAL delivery) ───────────────────────
+    review_backend: str = "log"           # "log" or "webhook"
+    review_webhook_url: str | None = None
+
+    # ── Ledger (persistent audit) ──────────────────────────────
+    ledger_path: str | None = None   # JSONL file path; None = disabled
+
+    # ── Heartbeat / liveness ──────────────────────────────────
+    heartbeat_interval_seconds: float = 30.0
+    health_port: int = 0            # 0 = disabled; set to e.g. 8080 for GET /health
+
     # ── Logging ───────────────────────────────────────────────
     log_level: str = "INFO"
     log_format: str = "json"
@@ -81,11 +101,35 @@ class Settings(BaseSettings):
         return []
 
 
+# Paper ports: TWS paper=7497, Gateway paper=4002
+# Live ports: TWS live=7496, Gateway live=4001
+_PAPER_PORTS: frozenset[int] = frozenset({7497, 4002})
+
+
+def validate_live_mode(settings: Settings) -> None:
+    """
+    Raise if paper_mode=False but ibkr_port is a paper port.
+    Prevents accidental live trading against a paper TWS/Gateway.
+    """
+    if settings.paper_mode:
+        return
+    if settings.ibkr_port in _PAPER_PORTS:
+        raise ValueError(
+            f"PAPER_MODE is False (live mode) but ibkr_port={settings.ibkr_port} "
+            f"is a paper port (7497=TWS paper, 4002=Gateway paper). "
+            "Use port 7496 (TWS live) or 4001 (Gateway live) for live trading."
+        )
+
+
 def load_settings(profile: str | None = None) -> Settings:
     """
     Load Settings from .env, then overlay non-secret values from the TOML
     profile (config/profiles/<profile>.toml).  Profile overrides risk %,
     ports, and strategy params — never secrets.
+
+    Profile directory resolution order:
+        1. OPENCLAWTRADER_CONFIG_DIR env var (absolute path)
+        2. config/profiles/ adjacent to this file (in-tree default)
     """
     base = Settings()
     effective_profile = profile or base.profile

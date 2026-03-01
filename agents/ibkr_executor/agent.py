@@ -24,9 +24,13 @@ Dependency injection:
 """
 from __future__ import annotations
 
+import asyncio
+import time
 from decimal import ROUND_DOWN, Decimal
 from typing import Any
+from uuid import UUID
 
+from audit.heartbeat import AgentHeartbeat
 from audit.hasher import stamp
 from audit.logger import bind_correlation_id, get_logger
 from bus.queue import PipelineBus
@@ -69,12 +73,27 @@ class IBKRExecutorAgent:
             connection if connection is not None else IBKRConnection(settings)
         )
         self._log = get_logger("ibkr_executor")
+        self._seen_decision_ids: dict[UUID, float] = {}
+        self._duplicate_ttl_seconds: float = 3600.0  # 1 hour
+        self._heartbeat = AgentHeartbeat(
+            "ibkr_executor",
+            interval_seconds=getattr(settings, "heartbeat_interval_seconds", 30.0),
+        )
 
     # ── public ──────────────────────────────────────────────────────────────
 
     async def run(self) -> None:
-        """Connect to IBKR, then consume bus.decisions indefinitely."""
+        """Connect to IBKR, reconcile open orders, then consume bus.decisions indefinitely."""
         await self._conn.connect()
+        await self._reconcile_open_orders()
+        self._heartbeat.start()
+        try:
+            await self._run_loop()
+        finally:
+            self._heartbeat.stop()
+
+    async def _run_loop(self) -> None:
+        """Inner loop — consumes decisions and emits receipts."""
         self._log.info(
             "ibkr_executor_started",
             profile=self._settings.profile,
@@ -109,6 +128,7 @@ class IBKRExecutorAgent:
 
     async def close(self) -> None:
         """Disconnect from IBKR cleanly."""
+        self._heartbeat.stop()
         self._conn.disconnect()
 
     # ── internal ────────────────────────────────────────────────────────────
@@ -134,6 +154,23 @@ class IBKRExecutorAgent:
                 )
             )
 
+        if self._is_duplicate_decision(decision.event_id):
+            self._log.warning(
+                "duplicate_decision_id_skipped",
+                decision_id=str(decision.event_id),
+                correlation_id=str(decision.correlation_id),
+            )
+            return stamp(  # type: ignore[return-value]
+                ExecutionReceipt(
+                    correlation_id=decision.correlation_id,
+                    source_decision_id=decision.event_id,
+                    status=OrderStatus.CANCELLED,
+                    error_message="duplicate_decision_id",
+                    is_paper=self._settings.paper_mode,
+                    profile=decision.profile,
+                )
+            )
+
         if decision.approved_ticker is None:
             return stamp(  # type: ignore[return-value]
                 ExecutionReceipt(
@@ -146,6 +183,8 @@ class IBKRExecutorAgent:
                 )
             )
 
+        self._record_decision_id(decision.event_id)
+
         # ── Route by asset class ──────────────────────────────────────────────
         if decision.use_smart_options_selector:
             return await self._execute_smart_options(decision)
@@ -154,6 +193,78 @@ class IBKRExecutorAgent:
             return await self._execute_explicit_option(decision)
 
         return await self._execute_equity(decision)
+
+    def _is_duplicate_decision(self, event_id: UUID) -> bool:
+        """Return True if this decision_id was already processed (within TTL)."""
+        self._prune_stale_decision_ids()
+        return event_id in self._seen_decision_ids
+
+    def _record_decision_id(self, event_id: UUID) -> None:
+        """Record that we are processing this decision (avoids duplicate execution)."""
+        self._seen_decision_ids[event_id] = time.monotonic()
+
+    def _prune_stale_decision_ids(self) -> None:
+        """Remove entries older than TTL to avoid unbounded growth."""
+        now = time.monotonic()
+        stale = [k for k, v in self._seen_decision_ids.items() if now - v > self._duplicate_ttl_seconds]
+        for k in stale:
+            del self._seen_decision_ids[k]
+
+    async def _reconcile_open_orders(self) -> None:
+        """
+        At startup, detect orphaned orders/fills with our order_ref format.
+        Log them for operator review; no auto-cancel.
+        """
+        ib = self._conn.ib
+        try:
+            open_trades = await ib.reqOpenOrdersAsync()  # type: ignore[no-untyped-call]
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(
+                "reconcile_open_orders_failed",
+                error=str(exc),
+            )
+            return
+        try:
+            fills = await ib.reqExecutionsAsync()  # type: ignore[no-untyped-call]
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(
+                "reconcile_executions_failed",
+                error=str(exc),
+            )
+            fills = []
+
+        def _is_our_order_ref(ref: str) -> bool:
+            if not ref or len(ref) != 20:
+                return False
+            try:
+                int(ref, 16)
+                return True
+            except ValueError:
+                return False
+
+        for trade in open_trades:
+            ref = getattr(trade.order, "orderRef", "") or ""
+            if _is_our_order_ref(ref):
+                self._log.info(
+                    "reconcile_orphaned_open_order",
+                    order_ref=ref,
+                    order_id=getattr(trade.orderStatus, "orderId", None),
+                    perm_id=getattr(trade.orderStatus, "permId", None),
+                    status=getattr(trade.orderStatus, "status", ""),
+                )
+
+        for fill in fills:
+            exec_obj = getattr(fill, "execution", None)
+            ref = getattr(exec_obj, "orderRef", "") or "" if exec_obj else ""
+            if _is_our_order_ref(ref):
+                self._log.info(
+                    "reconcile_orphaned_fill",
+                    order_ref=ref,
+                    exec_id=getattr(exec_obj, "execId", ""),
+                    order_id=getattr(exec_obj, "orderId", None),
+                    shares=getattr(exec_obj, "shares", None),
+                    price=getattr(exec_obj, "price", None),
+                )
 
     # ── Equity (shares) path ──────────────────────────────────────────────────
 
@@ -175,8 +286,13 @@ class IBKRExecutorAgent:
 
         contract = await resolve_contract(self._conn.ib, decision.approved_ticker)
         params = build_bracket_params(decision)
-        receipt = await _place_bracket_and_track(
-            self._conn.ib, contract, params, decision, self._settings.paper_mode
+        receipt = await _retry_place(
+            lambda: _place_bracket_and_track(
+                self._conn.ib, contract, params, decision, self._settings.paper_mode
+            ),
+            log=self._log,
+            correlation_id=decision.correlation_id,
+            label=f"equity_bracket:{decision.approved_ticker}",
         )
         stamped: ExecutionReceipt = stamp(receipt)  # type: ignore[assignment]
         self._log.info(
@@ -245,8 +361,13 @@ class IBKRExecutorAgent:
                 )
 
         params = build_option_order_params(decision, limit_price, quantity)
-        receipt = await _place_option_and_track(
-            self._conn.ib, contract, params, decision, self._settings.paper_mode
+        receipt = await _retry_place(
+            lambda: _place_option_and_track(
+                self._conn.ib, contract, params, decision, self._settings.paper_mode
+            ),
+            log=self._log,
+            correlation_id=decision.correlation_id,
+            label=f"explicit_option:{decision.approved_ticker}",
         )
         stamped: ExecutionReceipt = stamp(receipt)  # type: ignore[assignment]
         self._log.info(
@@ -395,6 +516,47 @@ class IBKRExecutorAgent:
 
 
 # ── Order placement helpers ─────────────────────────────────────────────────
+
+_ORDER_MAX_RETRIES: int = 2       # total attempts = 3 (initial + 2 retries)
+_ORDER_BACKOFF_BASE: float = 1.0  # seconds; doubles per retry
+
+
+async def _retry_place(
+    coro_factory: Any,
+    log: Any,
+    correlation_id: Any,
+    label: str,
+) -> Any:
+    """
+    Retry an async order-placement coroutine up to _ORDER_MAX_RETRIES extra times.
+
+    coro_factory is a zero-argument callable that returns a fresh coroutine each
+    time (necessary because coroutines are single-use).
+
+    Raises the last exception if all attempts fail.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, _ORDER_MAX_RETRIES + 2):  # +2: 1 initial + retries
+        try:
+            return await coro_factory()
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            delay = _ORDER_BACKOFF_BASE * (2 ** (attempt - 1))
+            log.warning(
+                "order_place_attempt_failed",
+                label=label,
+                attempt=attempt,
+                max_attempts=_ORDER_MAX_RETRIES + 1,
+                delay_s=delay,
+                error=str(exc),
+                correlation_id=str(correlation_id),
+            )
+            if attempt <= _ORDER_MAX_RETRIES:
+                await asyncio.sleep(delay)
+    raise RuntimeError(
+        f"order placement failed after {_ORDER_MAX_RETRIES + 1} attempts "
+        f"[{label}]: {last_exc}"
+    )
 
 
 async def _get_spot_price(ib_client: Any, stock_contract: Any) -> Decimal | None:

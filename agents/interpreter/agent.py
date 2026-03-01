@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from audit.heartbeat import AgentHeartbeat
 from audit.hasher import stamp
 from audit.logger import bind_correlation_id, get_logger
 from bus.queue import PipelineBus
@@ -37,15 +38,29 @@ class InterpreterAgent:
         - Options fields (option_type, strike, expiry) populated when signal
           specifies a contract
         - template_name is set to "llm_parsed" to distinguish from regex intents
+        - requires_manual_approval is always True — LLM intents NEVER auto-execute;
+          the Risk Officer will force NEEDS_APPROVAL on any intent with this flag
     """
 
     def __init__(self, settings: Settings, bus: PipelineBus) -> None:
         self._settings = settings
         self._bus = bus
         self._log = get_logger("interpreter")
+        self._heartbeat = AgentHeartbeat(
+            "interpreter",
+            interval_seconds=getattr(settings, "heartbeat_interval_seconds", 30.0),
+        )
 
     async def run(self) -> None:
         """Consume bus.signals indefinitely, emitting TradeIntents."""
+        self._heartbeat.start()
+        try:
+            await self._run_loop()
+        finally:
+            self._heartbeat.stop()
+
+    async def _run_loop(self) -> None:
+        """Inner loop — consumes signals and emits intents."""
         self._log.info(
             "interpreter_started",
             profile=self._settings.profile,
@@ -210,6 +225,8 @@ class InterpreterAgent:
             take_profit_price=_to_decimal(llm_result.take_profit_price),
             confidence=confidence,
             template_name="llm_parsed",
+            # LLM-produced intents NEVER auto-execute — forced NEEDS_APPROVAL.
+            requires_manual_approval=True,
             # Options fields
             option_type=_to_option_type(llm_result),
             strike=_to_decimal(llm_result.strike),

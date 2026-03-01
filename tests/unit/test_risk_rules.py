@@ -531,3 +531,117 @@ class TestEvaluateTrade:
         )
         # Smart selector: no entry price known → no R/R
         assert d.risk_reward_ratio is None
+
+
+# ── Sizing clamp ─────────────────────────────────────────────────────────────
+
+
+class TestSizingClamp:
+    """Tier % must be clamped to [min_position_pct, max_position_pct]."""
+
+    def test_high_tier_clamped_to_max(self) -> None:
+        """7.5% tier clamped to 7.0% when max_position_pct=0.07."""
+        d = evaluate_trade(
+            _intent(confidence=ConfidenceBucket.MEDIUM,
+                    entry="175.50", stop="172.00", target="181.00"),
+            _portfolio(sleeve="100000"),
+            max_open_positions=10,
+            max_daily_drawdown_pct=Decimal("0.05"),
+            max_position_pct=Decimal("0.07"),
+        )
+        assert d.outcome == RiskOutcome.APPROVED
+        # 7.5% clamped to 7.0% → position_size_pct should be 0.07
+        assert d.position_size_pct == Decimal("0.07")
+
+    def test_low_tier_clamped_to_min(self) -> None:
+        """5.0% tier raised to 6.0% when min_position_pct=0.06."""
+        d = evaluate_trade(
+            _intent(confidence=ConfidenceBucket.LOW,
+                    entry="175.50", stop="172.00", target="181.00"),
+            _portfolio(sleeve="100000"),
+            max_open_positions=10,
+            max_daily_drawdown_pct=Decimal("0.05"),
+            min_position_pct=Decimal("0.06"),
+        )
+        assert d.outcome == RiskOutcome.APPROVED
+        assert d.position_size_pct == Decimal("0.06")
+
+    def test_no_clamp_when_bounds_none(self) -> None:
+        """When min/max are None the raw tier % passes through unchanged."""
+        d = evaluate_trade(
+            _intent(confidence=ConfidenceBucket.MEDIUM,
+                    entry="175.50", stop="172.00", target="181.00"),
+            _portfolio(sleeve="100000"),
+            max_open_positions=10,
+            max_daily_drawdown_pct=Decimal("0.05"),
+        )
+        assert d.outcome == RiskOutcome.APPROVED
+        # MEDIUM tier is 7.5% — no clamp applied
+        assert d.position_size_pct == Decimal("0.075")
+
+    def test_clamp_does_not_exceed_max_position_pct(self) -> None:
+        """Position size pct in the decision must never exceed max_position_pct."""
+        max_pct = Decimal("0.04")
+        d = evaluate_trade(
+            _intent(confidence=ConfidenceBucket.HIGH,
+                    direction=Direction.SHORT,
+                    entry="175.50", stop="178.00", target="170.00"),
+            _portfolio(sleeve="100000"),
+            max_open_positions=10,
+            max_daily_drawdown_pct=Decimal("0.05"),
+            max_position_pct=max_pct,
+        )
+        assert d.outcome == RiskOutcome.APPROVED
+        assert d.position_size_pct <= max_pct
+
+
+# ── LLM gate (critical-path safety) ──────────────────────────────────────────
+
+
+class TestLLMGate:
+    """LLM-parsed intents must NEVER auto-execute: forced NEEDS_APPROVAL."""
+
+    def _llm_intent(self, **kwargs: object) -> TradeIntent:
+        """Build a TradeIntent that mimics LLM-path output."""
+        base = _intent(**kwargs)  # type: ignore[arg-type]
+        return base.model_copy(update={
+            "template_name": "llm_parsed",
+            "requires_manual_approval": True,
+        })
+
+    def test_llm_intent_is_needs_approval(self) -> None:
+        d = evaluate_trade(
+            self._llm_intent(), _portfolio(), **_limits()  # type: ignore[arg-type]
+        )
+        assert d.outcome == RiskOutcome.NEEDS_APPROVAL
+
+    def test_llm_intent_never_approved(self) -> None:
+        """Even a HIGH-confidence, fully valid signal must not get APPROVED."""
+        d = evaluate_trade(
+            self._llm_intent(confidence=ConfidenceBucket.HIGH),
+            _portfolio(), **_limits()  # type: ignore[arg-type]
+        )
+        assert d.outcome != RiskOutcome.APPROVED
+
+    def test_llm_gate_fires_before_circuit_breaker(self) -> None:
+        """LLM gate is checked first — halted state is irrelevant for NEEDS_APPROVAL."""
+        d = evaluate_trade(
+            self._llm_intent(), _portfolio(), **_limits(),  # type: ignore[arg-type]
+            is_manually_halted=True,
+        )
+        assert d.outcome == RiskOutcome.NEEDS_APPROVAL
+
+    def test_llm_rejection_reason_present(self) -> None:
+        d = evaluate_trade(
+            self._llm_intent(), _portfolio(), **_limits()  # type: ignore[arg-type]
+        )
+        assert any("llm_parsed" in r for r in d.rejection_reasons)
+
+    def test_regex_intent_unaffected(self) -> None:
+        """requires_manual_approval=False (default) → normal APPROVED path."""
+        d = evaluate_trade(
+            _intent(confidence=ConfidenceBucket.MEDIUM,
+                    entry="175.50", stop="172.00", target="181.00"),
+            _portfolio(), **_limits()  # type: ignore[arg-type]
+        )
+        assert d.outcome == RiskOutcome.APPROVED

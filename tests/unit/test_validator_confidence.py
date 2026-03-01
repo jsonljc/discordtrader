@@ -197,3 +197,21 @@ class TestInterpreterInterpret:
         intent = await agent._interpret(event)
         assert intent is not None
         assert intent.source_signal_id == event.event_id
+
+    @pytest.mark.asyncio
+    async def test_regex_intent_does_not_require_approval(self) -> None:
+        """Regex-parsed intents must NOT set requires_manual_approval."""
+        agent: InterpreterAgent = self._make_agent()
+        event: SignalEvent = self._make_event("BUY AAPL @ 175.50 stop 172.00 target 181.00")
+        intent = await agent._interpret(event)
+        assert intent is not None
+        assert intent.requires_manual_approval is False
+
+    @pytest.mark.asyncio
+    async def test_regex_intent_template_not_llm_parsed(self) -> None:
+        """Regex path must never set template_name to 'llm_parsed'."""
+        agent: InterpreterAgent = self._make_agent()
+        event: SignalEvent = self._make_event("BUY MSFT @ 420 stop 415 target 430")
+        intent = await agent._interpret(event)
+        assert intent is not None
+        assert intent.template_name != "llm_parsed"

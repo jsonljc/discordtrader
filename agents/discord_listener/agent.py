@@ -4,6 +4,7 @@ from typing import Any
 
 import discord
 
+from audit.heartbeat import AgentHeartbeat
 from audit.logger import bind_correlation_id, get_logger
 from bus.queue import PipelineBus
 from config.settings import Settings
@@ -63,6 +64,10 @@ class DiscordListenerAgent:
         self._filter = MessageFilter(settings)
         self._deduper = Deduper()
         self._log = get_logger("discord_listener")
+        self._heartbeat = AgentHeartbeat(
+            "listener",
+            interval_seconds=getattr(settings, "heartbeat_interval_seconds", 30.0),
+        )
 
         intents = discord.Intents.default()
         intents.message_content = True  # privileged intent — enable in Dev Portal
@@ -73,6 +78,10 @@ class DiscordListenerAgent:
     async def _handle_message(self, message: discord.Message) -> None:
         """Core per-message handler — tested directly without a live bot."""
         if message.author.bot:
+            return
+
+        # Discard messages with no text content (embed-only, sticker, etc.)
+        if not (message.content or "").strip():
             return
 
         guild_id = str(message.guild.id) if message.guild is not None else ""
@@ -122,10 +131,15 @@ class DiscordListenerAgent:
                 "discord_bot_token is not set. "
                 "Add DISCORD_BOT_TOKEN to your .env file."
             )
-        await self._client.start(token)
+        self._heartbeat.start()
+        try:
+            await self._client.start(token)
+        finally:
+            self._heartbeat.stop()
 
     async def close(self) -> None:
         """Gracefully close the Discord connection."""
+        self._heartbeat.stop()
         await self._client.close()
 
     @property

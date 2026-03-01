@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 
 from agents.ibkr_executor import IBKRExecutorAgent
 from audit.logger import configure_logging, get_logger
 from bus.queue import PipelineBus
-from config.settings import load_settings
+from config.settings import load_settings, validate_live_mode
 
 
 def _parse_args() -> argparse.Namespace:
@@ -39,7 +40,8 @@ def _parse_args() -> argparse.Namespace:
 async def _main() -> None:
     args = _parse_args()
     settings = load_settings(args.profile)
-    configure_logging(level=settings.log_level, fmt=settings.log_format)
+    validate_live_mode(settings)
+    configure_logging(settings.log_level, settings.log_format, settings.log_file)
     log = get_logger("run_executor")
 
     log.info(
@@ -58,5 +60,10 @@ async def _main() -> None:
         await agent.close()
 
 
+def main() -> None:
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(_main())
+
+
 if __name__ == "__main__":
-    asyncio.run(_main())
+    main()
