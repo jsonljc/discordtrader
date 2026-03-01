@@ -119,6 +119,8 @@ class PortfolioAdapter:
         for attempt in range(1, MAX_FETCH_ATTEMPTS + 1):
             try:
                 return await self._fetch(correlation_id)
+            except ConnectionError:
+                raise  # connection-level failures already retried in _ensure_connected
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 await self.close()   # reset connection before retry
